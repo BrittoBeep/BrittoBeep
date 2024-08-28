@@ -1,0 +1,111 @@
+from flask import Flask, render_template, request
+import pandas as pd
+import os
+from datetime import datetime
+
+app = Flask(__name__)
+
+# Carregar dados de cupons e produtos
+df_cupons = pd.read_excel(r"C:\Users\Beep Saude.BEEP1441\OneDrive\Documentos\Sales\meu_projeto\Calculadora_PontosMédicos.xlsx")
+df_produtos = pd.read_excel(r"C:\Users\Beep Saude.BEEP1441\OneDrive\Documentos\Sales\meu_projeto\Calculadora_PontosProdutos.xlsx")
+
+# Função para carregar o último código de troca salvo
+def carregar_ultimo_codigo(caminho_codigo):
+    if os.path.exists(caminho_codigo):
+        with open(caminho_codigo, "r") as file:
+            return file.read().strip()
+    else:
+        return "PRMC00002051"
+
+# Função para salvar o novo código de troca
+def salvar_codigo(caminho_codigo, novo_codigo):
+    with open(caminho_codigo, "w") as file:
+        file.write(novo_codigo)
+
+# Função para gerar o próximo código de troca
+def gerar_codigo_troca(ultimo_codigo):
+    numero = int(ultimo_codigo[4:]) + 1  # Incrementar o número
+    return f"PRMC{numero:08d}"
+
+# Função para registrar a troca ou cancelamento em um arquivo CSV
+def registrar_acao(codigo_acao, cupom, produto, quantidade, caminho_registro):
+    data_acao = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(caminho_registro, "a") as file:
+        file.write(f"{codigo_acao},{cupom},{produto},{quantidade},{data_acao}\n")
+
+@app.route("/", methods=["GET", "POST"])
+def index():
+    resultado = ""
+    codigo_troca = ""
+    caminho_codigo = r"C:\Users\Beep Saude.BEEP1441\OneDrive\Documentos\Sales\meu_projeto\ultimo_codigo.txt"
+    caminho_registro = r"C:\Users\Beep Saude.BEEP1441\OneDrive\Documentos\Sales\meu_projeto\trocas_registro.csv"
+
+    if request.method == "POST":
+        selected_cupom = request.form.get("cupom")
+        selected_produto = request.form.get("produto")
+        quantidade = int(request.form.get("quantidade"))
+        acao = request.form.get("acao")
+
+        if selected_cupom not in df_cupons["Cupom_Médico"].values:
+            resultado = f"O cupom {selected_cupom} não é válido."
+        else:
+            produto_row = df_produtos[df_produtos["Nome do Produto"] == selected_produto]
+            pontuacao_produto = produto_row["Pontuacao"].values[0] * quantidade
+
+            cupom_row = df_cupons[df_cupons["Cupom_Médico"] == selected_cupom]
+            pontuacao_cupom = cupom_row["Pontos"].values[0]
+            esmeralda = cupom_row["Esmeralda"].values[0]
+
+            if acao == "verificar":
+                percentual_atingido = (pontuacao_cupom / pontuacao_produto) * 100
+                resultado = (f"Cupom {selected_cupom} tem {pontuacao_cupom} pontos. "
+                             f"Pontuação necessária para {quantidade} {selected_produto}(s) é {pontuacao_produto} pontos. "
+                             f"Percentual atingido: {percentual_atingido:.0f}%. "
+                             f"Esmeralda: {esmeralda}")
+            elif acao == "trocar":
+                percentual_atingido = (pontuacao_cupom / pontuacao_produto) * 100
+                
+                if esmeralda == "SIM":
+                    if percentual_atingido < 100:
+                        # Troca com saldo inferior, saldo é zerado
+                        pontuacao_cupom = 0
+                    else:
+                        # Troca com saldo suficiente, pontuação é debitada
+                        pontuacao_cupom -= pontuacao_produto
+                else:
+                    # Cupons não Esmeralda podem trocar com saldo negativo
+                    pontuacao_cupom -= pontuacao_produto
+
+                # Atualizar e salvar o saldo do cupom
+                df_cupons.loc[df_cupons["Cupom_Médico"] == selected_cupom, "Pontos"] = pontuacao_cupom
+                df_cupons.to_excel(r"C:\Users\Beep Saude.BEEP1441\OneDrive\Documentos\Sales\meu_projeto\Calculadora_PontosMédicos.xlsx", index=False)
+
+                # Gerar código de troca
+                ultimo_codigo = carregar_ultimo_codigo(caminho_codigo)
+                codigo_troca = gerar_codigo_troca(ultimo_codigo)
+                salvar_codigo(caminho_codigo, codigo_troca)
+
+                # Registrar a troca
+                registrar_acao(codigo_troca, selected_cupom, selected_produto, quantidade, caminho_registro)
+
+                resultado = (f"Troca efetuada com sucesso! "
+                             f"Cupom {selected_cupom} agora tem {pontuacao_cupom} pontos. "
+                             f"Código de troca: {codigo_troca}")
+            elif acao == "cancelar":
+                # Adicionar a quantidade de volta ao saldo do cupom
+                pontuacao_cupom += pontuacao_produto
+                df_cupons.loc[df_cupons["Cupom_Médico"] == selected_cupom, "Pontos"] = pontuacao_cupom
+                df_cupons.to_excel(r"C:\Users\Beep Saude.BEEP1441\OneDrive\Documentos\Sales\meu_projeto\Calculadora_PontosMédicos.xlsx", index=False)
+
+                # Gerar código de cancelamento
+                codigo_cancelamento = f"CAN{codigo_troca[4:]}"
+                registrar_acao(codigo_cancelamento, selected_cupom, selected_produto, quantidade, caminho_registro)
+
+                resultado = f"Troca cancelada! Pontos restaurados para {pontuacao_cupom}."
+
+    cupons = df_cupons["Cupom_Médico"].tolist()
+    produtos = df_produtos["Nome do Produto"].tolist()
+    return render_template("index.html", cupons=cupons, produtos=produtos, resultado=resultado, codigo_troca=codigo_troca)
+
+if __name__ == "__main__":
+    app.run(host='0.0.0.0', port=5000, debug=True)    
